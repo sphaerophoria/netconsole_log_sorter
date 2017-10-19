@@ -138,6 +138,7 @@ impl NetconsoleLogger {
 
         let file = OpenOptions::new()
             .create(true)
+            .write(true)
             .open(&filepath)
             .chain_err(|| "Failed to open file")?;
 
