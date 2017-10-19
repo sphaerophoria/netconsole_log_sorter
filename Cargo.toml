@@ -1,0 +1,13 @@
+[package]
+authors = ["Mick Sayson <mick@sayson.com>"]
+name = "netconsole_log_sorter"
+version = "0.1.0"
+
+[dependencies]
+arraydeque = "0.2.3"
+error-chain = "0.11.0"
+hwaddr = "0.1.2"
+linear-map = "1.2.0"
+
+[dependencies.arp]
+git = "https://github.com/sphaerophoria/arp-rs"
