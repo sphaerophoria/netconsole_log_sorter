@@ -149,6 +149,7 @@ impl NetconsoleLogger {
 
         if needs_rotate {
             rotate_file(filepath.as_os_str());
+            self.files.remove(&sender.ip());
         }
 
         let file = self.get_file(&sender.ip())
