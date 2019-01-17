@@ -111,7 +111,7 @@ impl NetconsoleLogger {
     }
 
     fn get_filename_for_ip(&self, ip: &IpAddr) -> Result<PathBuf> {
-        let mac = get_mac_from_ip(ip)?;
+        let mac = get_mac_from_ip(ip).unwrap_or(HwAddr::from([0u8, 0u8, 0u8, 0u8, 0u8, 0u8]));
         let mac_str = format_mac(&mac);
         Ok(self.base_path.join(format!("{}.log", &mac_str)))
     }
