@@ -1,5 +1,4 @@
 extern crate arp;
-extern crate hwaddr;
 #[macro_use] extern crate error_chain;
 extern crate linear_map;
 extern crate arraydeque;
@@ -13,12 +12,12 @@ use std::ffi::OsStr;
 use std::convert::From;
 use std::env;
 use arraydeque::ArrayDeque;
-use hwaddr::HwAddr;
 use linear_map::LinearMap;
+use arp::MacAddr;
 
 error_chain!{}
 
-fn get_mac_from_ip(ip: &IpAddr) -> Result<HwAddr> {
+fn get_mac_from_ip(ip: &IpAddr) -> Result<MacAddr> {
     let arp_table = arp::get_arp_table()
         .chain_err(|| "Failed to get arp table")?;
 
@@ -47,10 +46,10 @@ fn rotate_file(filepath: &OsStr) {
     let _  = std::fs::rename(from, to);
 }
 
-fn format_mac(mac: &HwAddr) -> String {
-    let octets = mac.octets();
+fn format_mac(mac: &MacAddr) -> String {
+    let octets = mac.as_bytes();
     let mut mac_str = "".to_string();
-    for octet in &octets {
+    for octet in octets {
         mac_str = format!("{}{:02x}", mac_str, octet);
     }
 
@@ -111,7 +110,10 @@ impl NetconsoleLogger {
     }
 
     fn get_filename_for_ip(&self, ip: &IpAddr) -> Result<PathBuf> {
-        let mac = get_mac_from_ip(ip).unwrap_or(HwAddr::from([0u8, 0u8, 0u8, 0u8, 0u8, 0u8]));
+        let mac = get_mac_from_ip(ip)
+            .unwrap_or(
+                MacAddr::from_bytes(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8])
+                    .expect("Failed to create mac address from known data"));
         let mac_str = format_mac(&mac);
         Ok(self.base_path.join(format!("{}.log", &mac_str)))
     }
