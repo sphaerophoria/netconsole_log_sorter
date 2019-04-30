@@ -1,12 +1,13 @@
 [package]
 authors = ["Mick Sayson <mick@sayson.com>"]
+edition = "2018"
 name = "netconsole_log_sorter"
 version = "0.1.0"
 
 [dependencies]
-arraydeque = "0.2.3"
-error-chain = "0.11.0"
-linear-map = "1.2.0"
-
-[dependencies.arp]
-git = "https://github.com/sphaerophoria/arp-rs"
+cached = "0.8.0"
+crossbeam = "0.7.1"
+failure = "0.1.5"
+log = "0.4.6"
+pnet = "0.22.0"
+pretty_env_logger = "0.3.0"

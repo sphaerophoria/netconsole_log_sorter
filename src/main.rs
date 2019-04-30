@@ -1,179 +1,179 @@
-extern crate arp;
-#[macro_use] extern crate error_chain;
-extern crate linear_map;
-extern crate arraydeque;
+extern crate cached;
+extern crate crossbeam;
+extern crate failure;
+extern crate pnet;
+extern crate pretty_env_logger;
+#[macro_use]
+extern crate log;
 
-use std::io::Write;
-use std::net::{IpAddr, UdpSocket};
-use std::fs::{OpenOptions, File};
-use std::path::{PathBuf};
-use std::os::unix::fs::MetadataExt;
-use std::ffi::OsStr;
-use std::convert::From;
+use cached::stores::SizedCache;
+use cached::Cached;
+use failure::{Error, Fail};
+use pnet::datalink;
+use pnet::datalink::Channel::Ethernet;
+use pnet::datalink::DataLinkReceiver;
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
+use pnet::packet::ip::IpNextHeaderProtocols;
+use pnet::packet::ipv4::Ipv4Packet;
+use pnet::packet::udp::UdpPacket;
+use pnet::packet::{Packet, PacketSize, PrimitiveValues};
+use pnet::util::MacAddr;
+
 use std::env;
-use arraydeque::ArrayDeque;
-use linear_map::LinearMap;
-use arp::MacAddr;
+use std::fs::File;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-error_chain!{}
-
-fn get_mac_from_ip(ip: &IpAddr) -> Result<MacAddr> {
-    let arp_table = arp::get_arp_table()
-        .chain_err(|| "Failed to get arp table")?;
-
-    arp_table
-        .iter()
-        .find(|item| item.ip == *ip)
-        .map(|item| item.mac)
-        .ok_or_else(|| Error::from("Failed to lookup mac for ip"))
-}
-
-fn rotate_file(filepath: &OsStr) {
-    for i in (2..10).rev() {
-        let mut from = filepath.to_os_string();
-        from.push(format!(".{}", i-1));
-
-        let mut to = filepath.to_os_string();
-        to.push(format!(".{}", i));
-
-        let _ = std::fs::rename(from, to);
-    }
-
-    let from = filepath.to_os_string();
-    let mut to = filepath.to_os_string();
-    to.push(".1");
-
-    let _  = std::fs::rename(from, to);
-}
-
-fn format_mac(mac: &MacAddr) -> String {
-    let octets = mac.as_bytes();
-    let mut mac_str = "".to_string();
-    for octet in octets {
-        mac_str = format!("{}{:02x}", mac_str, octet);
-    }
-
-    mac_str
-}
-
-
-struct NetconsoleLogger {
+struct InterfaceLogger {
     base_path: PathBuf,
-    files: LinearMap<IpAddr, File>,
-    file_history: ArrayDeque<[IpAddr; 5]>,
-    udp_socket: UdpSocket,
+    file_cache: Arc<Mutex<SizedCache<MacAddr, File>>>,
+    udp_port: u16,
+    datalink_rx: Box<dyn DataLinkReceiver + 'static>,
+    mac_addr: MacAddr,
 }
 
-impl NetconsoleLogger {
-    fn new<T>(filepath: T, port: u16) -> NetconsoleLogger where PathBuf: From<T> {
-        NetconsoleLogger {
-            base_path: PathBuf::from(filepath),
-            files: LinearMap::new(),
-            file_history: ArrayDeque::new(),
-            udp_socket: UdpSocket::bind(("0.0.0.0", port)).expect("failed to bind"),
-        }
-    }
-
-    fn populate_file_for_ip(&mut self, ip: &IpAddr) -> Result<()> {
-        let ip_index = self.file_history
-            .iter()
-            .enumerate()
-            .find(|&(_, iter_ip)| iter_ip == ip)
-            .map(|(idx, _)| idx);
-
-        if let Some(ip_index) = ip_index {
-            self.file_history.remove(ip_index);
+impl InterfaceLogger {
+    fn get_file<'a>(file_cache: &'a mut SizedCache<MacAddr, File>, base_path: &Path, mac: &MacAddr) -> &'a File {
+        let val = file_cache.cache_get(&mac);
+        if val.is_some() {
+            // Unsafe block working around the compiler being too dumb to
+            // realize that the inner value of val _really_ is 'a
+            unsafe {
+                return std::mem::transmute::<&File, &'a File>(val.unwrap());
+            }
         }
 
-        let removed_ip = self.file_history.push_back(*ip);
-
-        if let Some(removed_ip) = removed_ip {
-            self.files.remove(&removed_ip);
-        }
-
-        if self.files.get(ip).is_some() {
-            return Ok(())
-        }
-
-        let filepath = self.get_filename_for_ip(ip)?;
-
-        let file = OpenOptions::new()
-            .write(true)
+        let (a, b, c, d, e, f) = mac.to_primitive_values();
+        let filename = format!("{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}.log", a, b, c, d, e, f);
+        let filename = base_path.join(filename);
+        let file = std::fs::OpenOptions::new()
             .create(true)
+            .write(true)
             .append(true)
-            .open(&filepath)
-            .chain_err(|| "Failed to open file")?;
+            .open(filename)
+            .unwrap();
 
-        self.files.insert(*ip, file);
-
-        Ok(())
+        file_cache.cache_set(mac.clone(), file);
+        file_cache.cache_get(&mac).unwrap()
     }
 
-    fn get_filename_for_ip(&self, ip: &IpAddr) -> Result<PathBuf> {
-        let mac = get_mac_from_ip(ip)
-            .unwrap_or(
-                MacAddr::from_bytes(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8])
-                    .expect("Failed to create mac address from known data"));
-        let mac_str = format_mac(&mac);
-        Ok(self.base_path.join(format!("{}.log", &mac_str)))
-    }
+    fn write_incoming_line_to_file(&mut self) -> Result<(), Error> {
+        let packet = self
+            .datalink_rx
+            .next()
+            .map_err(|e| e.context("Invalid packet"))?;
 
+        let ethernet_packet =
+            EthernetPacket::new(packet).ok_or(failure::Context::from("No ethernet packet"))?;
 
-    fn get_file(&mut self, ip: &IpAddr) -> Result<&mut File>
-    {
-        self.populate_file_for_ip(ip)
-            .chain_err(|| "Failed to insert file")?;
+        debug!("{:?}", ethernet_packet);
 
-        Ok(self.files.get_mut(ip).unwrap())
-    }
+        if ethernet_packet.get_destination() != self.mac_addr {
+            debug!("Ethernet frame not meant for us, returning early");
+            return Ok(());
+        }
 
-    fn write_incoming_line_to_file(&mut self) -> Result<()>
-    {
-        // Screw you if your MTU is larger than this
-        let mut buf = [0; 1500];
-
-        let (amnt, sender) = self.udp_socket
-            .recv_from(&mut buf)
-            .chain_err(|| "Failed to get udp message")?;
-
-        let filepath = &self.get_filename_for_ip(&sender.ip())?;
-
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&filepath)
-            .chain_err(|| "Failed to open file")?;
-
-        let needs_rotate = match file.metadata() {
-             Ok(metadata) => metadata.size() > 50 * 1024 * 1024,
-             Err(_) => false,
+        let ipv4_packet = match ethernet_packet.get_ethertype() {
+            EtherTypes::Ipv4 => Ipv4Packet::new(ethernet_packet.payload())
+                .ok_or(failure::Context::from("No ethernet payload"))?,
+            _ => {
+                info!("Unhandled ethernet packet type");
+                return Ok(());
+            }
         };
 
-        if needs_rotate {
-            rotate_file(filepath.as_os_str());
-            self.files.remove(&sender.ip());
+        debug!("{:?}", ipv4_packet);
+
+        let udp_packet = match ipv4_packet.get_next_level_protocol() {
+            IpNextHeaderProtocols::Udp => UdpPacket::new(ipv4_packet.payload())
+                .ok_or(failure::Context::from("No IPv4 payload"))?,
+            _ => {
+                debug!("Ipv4 packet is not udp, returning early");
+                return Ok(());
+            }
+        };
+
+        debug!("{:?}", udp_packet);
+
+        if udp_packet.get_destination() != self.udp_port {
+            debug!("Not the requested udp port, returning early");
+            return Ok(());
         }
 
-        let file = self.get_file(&sender.ip())
-            .chain_err(|| "Failed to get log file")?;
+        let mac = ethernet_packet.get_source();
+        let payload_size = udp_packet.get_length() as usize - udp_packet.packet_size() as usize;
+        let payload = &udp_packet.payload()[..payload_size];
+        {
+            let mut file_cache = self.file_cache.lock().unwrap();
+            let mut file = Self::get_file(&mut file_cache, &self.base_path, &mac);
 
-        let _ = file.write(&buf[0..amnt]);
+            file.write(payload)
+                .map_err(|e| e.context("Failed to write payload to file"))?;
+        }
 
         Ok(())
     }
 
-    fn run(&mut self) {
+    pub fn run(&mut self) {
         loop {
             if let Err(e) = self.write_incoming_line_to_file() {
-                println!("{}", error_chain::ChainedError::display_chain(&e));
+                error!("{:?}", e);
             }
         }
     }
 }
 
-fn main () {
-    let log_path = env::args().nth(1)
-        .unwrap_or_else(|| "".into());
+struct NetconsoleLogger {
+    interface_loggers: Vec<InterfaceLogger>,
+}
+
+impl NetconsoleLogger {
+    fn new<T>(filepath: T, port: u16) -> NetconsoleLogger
+    where
+        PathBuf: From<T>,
+    {
+        let file_cache = Arc::new(Mutex::new(SizedCache::with_size(5)));
+        let base_path = PathBuf::from(filepath);
+        let interface_loggers = datalink::interfaces()
+            .into_iter()
+            .filter(|iface| iface.mac.is_some())
+            .filter_map(|iface| {
+                datalink::channel(&iface, Default::default())
+                    .ok()
+                    .map(|x| (iface.mac.unwrap(), x))
+            })
+            .filter_map(|(mac, channel)| match channel {
+                Ethernet(_, rx) => Some((mac, rx)),
+                _ => None,
+            })
+            .map(|(mac, channel)| InterfaceLogger {
+                base_path: base_path.clone(),
+                file_cache: Arc::clone(&file_cache),
+                udp_port: port,
+                datalink_rx: channel,
+                mac_addr: mac,
+            })
+            .collect();
+
+        NetconsoleLogger {
+            interface_loggers
+        }
+    }
+
+    fn run(&mut self) {
+        crossbeam::scope(|scope| {
+            for interface_logger in self.interface_loggers.iter_mut() {
+                scope.spawn(move |_| interface_logger.run());
+            }
+        }).unwrap();
+    }
+}
+
+fn main() {
+    pretty_env_logger::init();
+
+    let log_path = env::args().nth(1).unwrap_or_else(|| "".into());
 
     let mut netconsole_logger = NetconsoleLogger::new(log_path, 6666);
     netconsole_logger.run();
