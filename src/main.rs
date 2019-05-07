@@ -34,22 +34,20 @@ struct InterfaceLogger {
 }
 
 impl InterfaceLogger {
-    fn get_file_name(base_path: &Path, mac: &MacAddr) -> PathBuf {
+    fn get_file_name(base_path: &Path, mac: MacAddr) -> PathBuf {
         let (a, b, c, d, e, f) = mac.to_primitive_values();
         let filename = format!("{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}.log", a, b, c, d, e, f);
-        let filename = base_path.join(filename);
-        filename
+        base_path.join(filename)
     }
 
-    fn create_file(base_path: &Path, mac: &MacAddr) -> File {
+    fn create_file(base_path: &Path, mac: MacAddr) -> File {
         let filename = Self::get_file_name(base_path, mac);
-        let file = std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .append(true)
             .open(filename)
-            .unwrap();
-        file
+            .unwrap()
     }
 
     fn get_rolled_file_name(base_file_name: &Path, idx: usize) -> PathBuf {
@@ -64,8 +62,8 @@ impl InterfaceLogger {
     }
 
     fn roll_file(base_file_name: &Path) -> Result<(), Error> {
-        let metadata = std::fs::metadata(base_file_name)
-            .map_err(|e| e.context("Failed to get metadata"))?;
+        let metadata =
+            std::fs::metadata(base_file_name).map_err(|e| e.context("Failed to get metadata"))?;
 
         if metadata.len() < 10 * 1024 * 1024 {
             return Ok(());
@@ -77,33 +75,35 @@ impl InterfaceLogger {
             let new_name = Self::get_rolled_file_name(base_file_name, i + 1);
             let old_name = Self::get_rolled_file_name(base_file_name, i + 1);
             if let Err(e) = std::fs::rename(&old_name, &new_name) {
-                return Err(failure::err_msg(
-                    format!("Failed to roll {} into {} ({})",
-                        old_name.into_os_string().into_string().unwrap(),
-                        new_name.into_os_string().into_string().unwrap(),
-                        e)
-                    ));
+                return Err(failure::err_msg(format!(
+                    "Failed to roll {} into {} ({})",
+                    old_name.into_os_string().into_string().unwrap(),
+                    new_name.into_os_string().into_string().unwrap(),
+                    e
+                )));
             }
         }
 
         Ok(())
     }
 
-    fn get_file<'a>(file_cache: &'a mut SizedCache<MacAddr, File>, base_path: &Path, mac: &MacAddr) -> &'a File {
+    fn get_file<'a>(
+        file_cache: &'a mut SizedCache<MacAddr, File>,
+        base_path: &Path,
+        mac: MacAddr,
+    ) -> &'a File {
         if let Err(e) = Self::roll_file(&Self::get_file_name(base_path, mac)) {
             error!("{}", e);
         }
 
-        let cached_file = match file_cache.cache_get(&mac) {
+        match file_cache.cache_get(&mac) {
             Some(x) => unsafe { std::mem::transmute::<&File, &'a File>(x) },
             None => {
                 let file = Self::create_file(base_path, mac);
-                file_cache.cache_set(mac.clone(), file);
+                file_cache.cache_set(mac, file);
                 file_cache.cache_get(&mac).unwrap()
             }
-        };
-
-        cached_file
+        }
     }
 
     fn write_incoming_line_to_file(&mut self) -> Result<(), Error> {
@@ -113,7 +113,7 @@ impl InterfaceLogger {
             .map_err(|e| e.context("Invalid packet"))?;
 
         let ethernet_packet =
-            EthernetPacket::new(packet).ok_or(failure::Context::from("No ethernet packet"))?;
+            EthernetPacket::new(packet).ok_or_else(|| failure::err_msg("No ethernet packet"))?;
 
         debug!("{:?}", ethernet_packet);
 
@@ -124,7 +124,7 @@ impl InterfaceLogger {
 
         let ipv4_packet = match ethernet_packet.get_ethertype() {
             EtherTypes::Ipv4 => Ipv4Packet::new(ethernet_packet.payload())
-                .ok_or(failure::Context::from("No ethernet payload"))?,
+                .ok_or_else(|| failure::err_msg("No ethernet payload"))?,
             _ => {
                 info!("Unhandled ethernet packet type");
                 return Ok(());
@@ -135,7 +135,7 @@ impl InterfaceLogger {
 
         let udp_packet = match ipv4_packet.get_next_level_protocol() {
             IpNextHeaderProtocols::Udp => UdpPacket::new(ipv4_packet.payload())
-                .ok_or(failure::Context::from("No IPv4 payload"))?,
+                .ok_or_else(|| failure::err_msg("No IPv4 payload"))?,
             _ => {
                 debug!("Ipv4 packet is not udp, returning early");
                 return Ok(());
@@ -154,7 +154,7 @@ impl InterfaceLogger {
         let payload = &udp_packet.payload()[..payload_size];
         {
             let mut file_cache = self.file_cache.lock().unwrap();
-            let mut file = Self::get_file(&mut file_cache, &self.base_path, &mac);
+            let mut file = Self::get_file(&mut file_cache, &self.base_path, mac);
 
             file.write(payload)
                 .map_err(|e| e.context("Failed to write payload to file"))?;
@@ -204,9 +204,7 @@ impl NetconsoleLogger {
             })
             .collect();
 
-        NetconsoleLogger {
-            interface_loggers
-        }
+        NetconsoleLogger { interface_loggers }
     }
 
     fn run(&mut self) {
@@ -214,7 +212,8 @@ impl NetconsoleLogger {
             for interface_logger in self.interface_loggers.iter_mut() {
                 scope.spawn(move |_| interface_logger.run());
             }
-        }).unwrap();
+        })
+        .unwrap();
     }
 }
 
