@@ -34,28 +34,76 @@ struct InterfaceLogger {
 }
 
 impl InterfaceLogger {
-    fn get_file<'a>(file_cache: &'a mut SizedCache<MacAddr, File>, base_path: &Path, mac: &MacAddr) -> &'a File {
-        let val = file_cache.cache_get(&mac);
-        if val.is_some() {
-            // Unsafe block working around the compiler being too dumb to
-            // realize that the inner value of val _really_ is 'a
-            unsafe {
-                return std::mem::transmute::<&File, &'a File>(val.unwrap());
-            }
-        }
-
+    fn get_file_name(base_path: &Path, mac: &MacAddr) -> PathBuf {
         let (a, b, c, d, e, f) = mac.to_primitive_values();
         let filename = format!("{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}.log", a, b, c, d, e, f);
         let filename = base_path.join(filename);
+        filename
+    }
+
+    fn create_file(base_path: &Path, mac: &MacAddr) -> File {
+        let filename = Self::get_file_name(base_path, mac);
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .append(true)
             .open(filename)
             .unwrap();
+        file
+    }
 
-        file_cache.cache_set(mac.clone(), file);
-        file_cache.cache_get(&mac).unwrap()
+    fn get_rolled_file_name(base_file_name: &Path, idx: usize) -> PathBuf {
+        match idx {
+            0 => base_file_name.to_path_buf(),
+            _ => {
+                let mut rolled_name = base_file_name.as_os_str().to_os_string();
+                rolled_name.push(format!(".{}", idx));
+                PathBuf::from(rolled_name)
+            }
+        }
+    }
+
+    fn roll_file(base_file_name: &Path) -> Result<(), Error> {
+        let metadata = std::fs::metadata(base_file_name)
+            .map_err(|e| e.context("Failed to get metadata"))?;
+
+        if metadata.len() < 10 * 1024 * 1024 {
+            return Ok(());
+        }
+
+        debug!("Rolling file");
+
+        for i in (0..9).rev() {
+            let new_name = Self::get_rolled_file_name(base_file_name, i + 1);
+            let old_name = Self::get_rolled_file_name(base_file_name, i + 1);
+            if let Err(e) = std::fs::rename(&old_name, &new_name) {
+                return Err(failure::err_msg(
+                    format!("Failed to roll {} into {} ({})",
+                        old_name.into_os_string().into_string().unwrap(),
+                        new_name.into_os_string().into_string().unwrap(),
+                        e)
+                    ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_file<'a>(file_cache: &'a mut SizedCache<MacAddr, File>, base_path: &Path, mac: &MacAddr) -> &'a File {
+        if let Err(e) = Self::roll_file(&Self::get_file_name(base_path, mac)) {
+            error!("{}", e);
+        }
+
+        let cached_file = match file_cache.cache_get(&mac) {
+            Some(x) => unsafe { std::mem::transmute::<&File, &'a File>(x) },
+            None => {
+                let file = Self::create_file(base_path, mac);
+                file_cache.cache_set(mac.clone(), file);
+                file_cache.cache_get(&mac).unwrap()
+            }
+        };
+
+        cached_file
     }
 
     fn write_incoming_line_to_file(&mut self) -> Result<(), Error> {
