@@ -73,14 +73,16 @@ impl InterfaceLogger {
 
         for i in (0..9).rev() {
             let new_name = Self::get_rolled_file_name(base_file_name, i + 1);
-            let old_name = Self::get_rolled_file_name(base_file_name, i + 1);
+            let old_name = Self::get_rolled_file_name(base_file_name, i);
             if let Err(e) = std::fs::rename(&old_name, &new_name) {
-                return Err(failure::err_msg(format!(
-                    "Failed to roll {} into {} ({})",
-                    old_name.into_os_string().into_string().unwrap(),
-                    new_name.into_os_string().into_string().unwrap(),
-                    e
-                )));
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(failure::err_msg(format!(
+                        "Failed to roll {} into {} ({})",
+                        old_name.into_os_string().into_string().unwrap(),
+                        new_name.into_os_string().into_string().unwrap(),
+                        e
+                    )));
+                }
             }
         }
 
