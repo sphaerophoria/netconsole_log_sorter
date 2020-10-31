@@ -1,6 +1,7 @@
+#[macro_use]
+extern crate anyhow;
 extern crate cached;
 extern crate crossbeam;
-extern crate failure;
 extern crate pnet;
 extern crate pretty_env_logger;
 #[macro_use]
@@ -8,7 +9,6 @@ extern crate log;
 
 use cached::stores::SizedCache;
 use cached::Cached;
-use failure::{Error, Fail};
 use pnet::datalink;
 use pnet::datalink::Channel::Ethernet;
 use pnet::datalink::DataLinkReceiver;
@@ -24,6 +24,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use anyhow::{Context, Result};
 
 struct InterfaceLogger {
     base_path: PathBuf,
@@ -61,9 +62,10 @@ impl InterfaceLogger {
         }
     }
 
-    fn roll_file(base_file_name: &Path) -> Result<(), Error> {
+    fn roll_file(base_file_name: &Path) -> Result<()> {
         let metadata =
-            std::fs::metadata(base_file_name).map_err(|e| e.context("Failed to get metadata"))?;
+            std::fs::metadata(base_file_name)
+                .context("Failed to get metadata")?;
 
         if metadata.len() < 10 * 1024 * 1024 {
             return Ok(());
@@ -76,7 +78,7 @@ impl InterfaceLogger {
             let old_name = Self::get_rolled_file_name(base_file_name, i);
             if let Err(e) = std::fs::rename(&old_name, &new_name) {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    return Err(failure::err_msg(format!(
+                    return Err(anyhow!(format!(
                         "Failed to roll {} into {} ({})",
                         old_name.into_os_string().into_string().unwrap(),
                         new_name.into_os_string().into_string().unwrap(),
@@ -108,14 +110,15 @@ impl InterfaceLogger {
         }
     }
 
-    fn write_incoming_line_to_file(&mut self) -> Result<(), Error> {
+    fn write_incoming_line_to_file(&mut self) -> Result<()> {
         let packet = self
             .datalink_rx
             .next()
-            .map_err(|e| e.context("Invalid packet"))?;
+            .context("Invalid packet")?;
 
         let ethernet_packet =
-            EthernetPacket::new(packet).ok_or_else(|| failure::err_msg("No ethernet packet"))?;
+            EthernetPacket::new(packet)
+            .context("No ethernet packet")?;
 
         debug!("{:?}", ethernet_packet);
 
@@ -126,7 +129,7 @@ impl InterfaceLogger {
 
         let ipv4_packet = match ethernet_packet.get_ethertype() {
             EtherTypes::Ipv4 => Ipv4Packet::new(ethernet_packet.payload())
-                .ok_or_else(|| failure::err_msg("No ethernet payload"))?,
+                .context("No ethernet payload")?,
             _ => {
                 info!("Unhandled ethernet packet type");
                 return Ok(());
@@ -137,7 +140,7 @@ impl InterfaceLogger {
 
         let udp_packet = match ipv4_packet.get_next_level_protocol() {
             IpNextHeaderProtocols::Udp => UdpPacket::new(ipv4_packet.payload())
-                .ok_or_else(|| failure::err_msg("No IPv4 payload"))?,
+                .context("No IPv4 payload")?,
             _ => {
                 debug!("Ipv4 packet is not udp, returning early");
                 return Ok(());
@@ -159,7 +162,7 @@ impl InterfaceLogger {
             let mut file = Self::get_file(&mut file_cache, &self.base_path, mac);
 
             file.write(payload)
-                .map_err(|e| e.context("Failed to write payload to file"))?;
+                .context("Failed to write payload to file")?;
         }
 
         Ok(())

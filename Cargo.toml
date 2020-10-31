@@ -5,9 +5,9 @@ name = "netconsole_log_sorter"
 version = "0.1.0"
 
 [dependencies]
+anyhow = "1.0.33"
 cached = "0.20.0"
 crossbeam = "0.8.0"
-failure = "0.1.8"
 log = "0.4.11"
 pnet = "0.26.0"
 pretty_env_logger = "0.4.0"
