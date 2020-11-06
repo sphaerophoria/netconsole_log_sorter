@@ -62,13 +62,13 @@ impl InterfaceLogger {
         }
     }
 
-    fn roll_file(base_file_name: &Path) -> Result<()> {
+    fn roll_file(base_file_name: &Path) -> Result<bool> {
         let metadata =
             std::fs::metadata(base_file_name)
                 .context("Failed to get metadata")?;
 
         if metadata.len() < 10 * 1024 * 1024 {
-            return Ok(());
+            return Ok(false);
         }
 
         debug!("Rolling file");
@@ -88,7 +88,7 @@ impl InterfaceLogger {
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn get_file<'a>(
@@ -96,8 +96,14 @@ impl InterfaceLogger {
         base_path: &Path,
         mac: MacAddr,
     ) -> &'a File {
-        if let Err(e) = Self::roll_file(&Self::get_file_name(base_path, mac)) {
-            error!("{}", e);
+        match Self::roll_file(&Self::get_file_name(base_path, mac)) {
+            Ok(true) => (),
+            Ok(false) => {
+                file_cache.cache_remove(&mac);
+            },
+            Err(e) => {
+                error!("{}", e);
+            },
         }
 
         match file_cache.cache_get(&mac) {
