@@ -97,10 +97,10 @@ impl InterfaceLogger {
         mac: MacAddr,
     ) -> &'a File {
         match Self::roll_file(&Self::get_file_name(base_path, mac)) {
-            Ok(true) => (),
-            Ok(false) => {
+            Ok(true) => {
                 file_cache.cache_remove(&mac);
-            },
+            }
+            Ok(false) => (),
             Err(e) => {
                 error!("{}", e);
             },
